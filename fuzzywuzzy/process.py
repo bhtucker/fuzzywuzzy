@@ -28,6 +28,9 @@ import itertools
 
 from . import fuzz
 from . import utils
+from sklearn.feature_extraction.text import CountVectorizer
+from scipy.sparse import dia_matrix
+import numpy as np
 
 
 def extract(query, choices, processor=None, scorer=None, limit=5):
@@ -73,7 +76,8 @@ def extract(query, choices, processor=None, scorer=None, limit=5):
     return sl[:limit]
 
 
-def extractBests(query, choices, processor=None, scorer=None, score_cutoff=0, limit=5):
+def extract_bests(query, choices, processor=None, scorer=None,
+                  score_cutoff=0, limit=5):
     """Find best matches above a score in a list of choices, return a
     list of tuples containing the match and it's score.
 
@@ -93,7 +97,7 @@ def extractBests(query, choices, processor=None, scorer=None, score_cutoff=0, li
         return []
 
 
-def extractOne(query, choices, processor=None, scorer=None, score_cutoff=0):
+def extract_one(query, choices, processor=None, scorer=None, score_cutoff=0):
     """Find the best match above a score in a list of choices, return a
     tuple containing the match and it's score if it's above the treshold
     or None.
@@ -119,32 +123,26 @@ def extractOne(query, choices, processor=None, scorer=None, score_cutoff=0):
         return None
 
 
-"""
-Sometimes an application might want to perform a lot of match extraction from the same set of choices.
-A common solution in the loose string literature is to use a 'pruning' lower bound that's inexpensive to compute
-and reduces the number of strings you'll actually call the scorer function with. A common pruning function
-is to look at the n-gram signatures of the search pool and disqualify totally dissimilar strings.
+def get_vectorizer_and_mat(choices, in_ngram_range=(3, 3),
+                           in_analyzer='char', in_min_df = 1):
 
-In a large application, one might use something like Apache Solr, but you can easily achieve much
-of the loose search performance gain using SciPy. The SciPy objects are sparse
-COO (coordinate) matrices, and so are relatively lightweight and (I believe) can be pickled well.
-"""
-
-def getNGramVectorizerAndMatrix(choices, in_ngram_range = (3,3), in_analyzer='char',in_min_df = 1):
-    """Return a (vectorizer,matrix) tuple with ngram respresentation of choices and vectorizer to 
+    """
+    Sometimes an application might want to perform a lot of match extraction from the same set of choices.
+    A common solution in the loose string literature is to use a 'pruning' lower bound that's inexpensive to compute
+    and reduces the number of strings you'll actually call the scorer function with. A common pruning function
+    is to look at the n-gram signatures of the search pool and disqualify totally dissimilar strings.
+    
+    Return a (vectorizer,matrix) tuple with ngram respresentation of choices and vectorizer to
     transform future queries. Defaults to 3-character ngrams; can be optionally set with in_ngram_range.
-    """ 
-
-    from sklearn.feature_extraction.text import CountVectorizer
-    from scipy.sparse import dia_matrix
-    import numpy as np
+    """
 
     #initialize the vectorizer
-    ngram_vectorizer = CountVectorizer(analyzer=in_analyzer, ngram_range = in_ngram_range, min_df = in_min_df)
+    ngram_vectorizer = CountVectorizer(
+        analyzer=in_analyzer, ngram_range=in_ngram_range, min_df=in_min_df)
 
     #process the choices argument
     clean_choices = [utils.full_process(utils.asciidammit(x)) for x in choices]
-    
+
     #create ngram features in the vectorizer for every ngram in the choices set
     ngram_vectorizer.fit(clean_choices)
 
@@ -154,17 +152,20 @@ def getNGramVectorizerAndMatrix(choices, in_ngram_range = (3,3), in_analyzer='ch
     #rescale these entries to all sum to 1 so that the dot-product measure doens't bias towards longer strings
     #(perhaps this should scale to have equal norm and not sum?)
     Y = choices_matrix.sum(axis=1)
+
     #make a diagonal matrix of the row sums for rescaling
-    diag =dia_matrix(((1./Y.transpose()),[0]),shape=(len(Y),len(Y)))
+    diag = dia_matrix(((1. / Y.transpose()), [0]), shape=(len(Y), len(Y)))
 
     #overwrite choices_matrix with rescaled version
-    choices_matrix = diag*choices_matrix
+    choices_matrix = diag * choices_matrix
 
-    return (ngram_vectorizer,choices_matrix)
+    return (ngram_vectorizer, choices_matrix)
 
-def extractWithVectorizer(query, choices, choices_matrix, vectorizer, threshold=3,in_score_cutoff=94):
+
+def extract_with_vectorizer(query, choices, choices_matrix, vectorizer,
+                            threshold=3, in_score_cutoff=94):
     """Given a query and choicelist (like normal extract()) and choice matrix and vectorizer, find
-    choices with a ngram similarity above threshold (optional parameter, default to 3) and then 
+    choices with a ngram similarity above threshold (optional parameter, default to 3) and then
     return the best match from that short list with a fuzzywuzzy score above in_score_cutoff (def. 94)
     """
 
@@ -175,12 +176,10 @@ def extractWithVectorizer(query, choices, choices_matrix, vectorizer, threshold=
     resultarray = np.array(choices_matrix.dot(query_vector.transpose()).todense())
     
     #array of indices of rows where dot product was above threshold
-    choice_indices = np.where(resultarray > threshold)[0] 
+    choice_indices = np.where(resultarray > threshold)[0]
 
     #list of strings from 'choices' at given indices
     short_list = [choices[i] for i in choice_indices]
 
     #extractOne to find best option from short list
-    return extractOne(query,short_list,score_cutoff=in_score_cutoff)
-
-
+    return extract_one(query, short_list, score_cutoff=in_score_cutoff)
